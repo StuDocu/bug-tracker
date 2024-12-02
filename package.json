@@ -1,0 +1,29 @@
+{
+  "name": "bug-tracker",
+  "version": "1.0.0",
+  "description": "A script to fetch bug-type cards from Shortcut and write them to Google Sheets",
+  "main": "dist/script.js",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/script.js"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/calcust/bug-tracker.git"
+  },
+  "keywords": [],
+  "author": "Calvin Custodio",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/calcust/bug-tracker/issues"
+  },
+  "homepage": "https://github.com/calcust/bug-tracker#readme",
+  "dependencies": {
+    "googleapis": "^144.0.0",
+    "dotenv": "^8.2.0"
+  },
+  "devDependencies": {
+    "@types/node": "^14.14.31",
+    "typescript": "^4.1.3"
+  }
+}
