@@ -3,16 +3,6 @@ name: Run Shortcut to Google Sheets
 on:
   schedule:
     - cron: '0 22 * * *' # 23:00 CET (22:00 UTC)
-  workflow_dispatch: # Allows manual triggering
-    inputs:
-      team_name:
-        description: 'Team name'
-        required: true
-        default: 'default_team'
-      days:
-        description: 'Number of days'
-        required: true
-        default: '90'
 
 jobs:
   run-script:
@@ -25,7 +15,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v2
         with:
-          node-version: '14'
+          node-version: '23.1.0'
 
       - name: Install dependencies
         run: npm install
@@ -33,15 +23,5 @@ jobs:
       - name: Compile TypeScript
         run: npm run build
 
-      - name: Upload Google credentials
-        env:
-          GOOGLE_APPLICATION_CREDENTIALS: ${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}
-        run: echo "${{ secrets.GOOGLE_APPLICATION_CREDENTIALS }}" > google-credentials.json
-
       - name: Run script
-        run: npm start
-        env:
-          SHORTCUT_API_TOKEN: ${{ secrets.SHORTCUT_API_TOKEN }}
-          GOOGLE_APPLICATION_CREDENTIALS: google-credentials.json
-          TEAM_NAME: ${{ github.event.inputs.team_name }}
-          DAYS: ${{ github.event.inputs.days }}
+        run: node dist/script.js
