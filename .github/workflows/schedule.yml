@@ -3,6 +3,7 @@ name: Run Shortcut to Google Sheets
 on:
   schedule:
     - cron: '0 22 * * *' # 23:00 CET (22:00 UTC)
+  workflow_dispatch: # Allow manual trigger
 
 jobs:
   run-script:
