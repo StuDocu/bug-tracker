@@ -149,6 +149,28 @@ const writeToGoogleSheets = async (data: any[]): Promise<Result<void>> => {
   }
 };
 
+// Function to refresh the Google Sheet
+const refreshGoogleSheet = async (spreadsheetId: string) => {
+  try {
+    const credentials = JSON.parse(Buffer.from(GOOGLE_CREDENTIALS_BASE64 || '', 'base64').toString('utf8'));
+    const auth = new google.auth.GoogleAuth({
+      credentials,
+      scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+    });
+
+    const sheets = google.sheets({ version: 'v4', auth });
+
+    await sheets.spreadsheets.values.clear({
+      spreadsheetId,
+      range: GOOGLE_SHEETS_RANGE,
+    });
+
+    console.log('Google Sheet refreshed successfully.');
+  } catch (error) {
+    console.error('Error refreshing Google Sheet:', error);
+  }
+};
+
 // Function to format date to "YYYY-MM-DD"
 const formatDate = (dateString: string | null): string => {
   if (!dateString) return '';
@@ -210,12 +232,19 @@ const main = async (): Promise<void> => {
   const formattedData = formatBugData(bugCardsResult.value, groupsResult.value);
 
   const writeResult = await writeToGoogleSheets([[
-    'ID', 'Name', 'Story Type', 'Started At', 'Completed At', 'Created At', 'Updated At', 'Custom Fields', 'Labels', 'Estimate', 'Num Related Documents', 'App URL', 'Team Name'
+    'ID', 'Name', 'Story Type', 'Started At', 'Completed At', 'Created At', 'Updated At', 'Bug Type', 'Labels', 'Estimate', 'Num Related Documents', 'App URL', 'Team Name'
   ], ...formattedData]);
 
   if (!writeResult.success) {
     console.error('Error writing to Google Sheets:', writeResult.error);
     return;
+  }
+
+  // Refresh the Google Sheet
+  if (GOOGLE_SHEETS_ID) {
+    await refreshGoogleSheet(GOOGLE_SHEETS_ID);
+  } else {
+    console.error('Error: GOOGLE_SHEETS_ID is not defined.');
   }
 
   console.log('🎉✨ Data successfully written to Google Sheets! 🚀📊');
