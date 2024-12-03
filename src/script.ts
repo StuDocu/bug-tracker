@@ -23,6 +23,12 @@ type Bug = {
   stats: { num_related_documents: number };
   app_url: string;
   team_name?: string;
+  group_id?: string;
+};
+
+type Group = {
+  id: string;
+  name: string;
 };
 
 type ShortcutResponse = {
@@ -33,6 +39,7 @@ type ShortcutResponse = {
 // Shortcut API configuration
 const SHORTCUT_API_TOKEN = process.env.SHORTCUT_API_TOKEN;
 const SHORTCUT_API_URL = 'https://api.app.shortcut.com/api/v3/search/stories';
+const SHORTCUT_GROUPS_API_URL = 'https://api.app.shortcut.com/api/v3/groups';
 
 // Google Sheets API configuration
 const GOOGLE_SHEETS_ID = process.env.GOOGLE_SHEETS_ID;
@@ -55,9 +62,16 @@ const getAllBugCardsFromShortcut = async (): Promise<Result<Bug[]>> => {
 
   try {
     do {
-      const url = next ? `${SHORTCUT_API_URL}${next}` : `${SHORTCUT_API_URL}?query=${encodeURIComponent(query)}`;
+      const url = next ? new URL(next, SHORTCUT_API_URL).href : `${SHORTCUT_API_URL}?query=${encodeURIComponent(query)}`;
       console.log(`Fetching URL: ${url}`); // Debugging log
-      const response: Response = await fetch(url, {
+
+      // Break the loop if the next parameter contains a specific pattern
+      if (next && next.includes('page_size=1')) {
+        console.log('Breaking the loop to avoid 400 error');
+        break;
+      }
+
+      const response = await fetch(url, {
         headers: {
           'Shortcut-Token': SHORTCUT_API_TOKEN || '',
         },
@@ -69,11 +83,42 @@ const getAllBugCardsFromShortcut = async (): Promise<Result<Bug[]>> => {
 
       const data: ShortcutResponse = await response.json();
       allBugs = allBugs.concat(data.data);
-      next = data.next ? data.next : null;
+      next = data.next;
     } while (next);
+
+    console.log(`Fetched ${allBugs.length} bug cards`); // Debugging log
 
     return { success: true, value: allBugs };
   } catch (error) {
+    return { success: false, error };
+  }
+};
+
+// Function to get all groups from Shortcut
+const getAllGroupsFromShortcut = async (): Promise<Result<Group[]>> => {
+  try {
+    console.log(`Fetching groups/teams from URL: ${SHORTCUT_GROUPS_API_URL}`); // Debugging log
+    const response = await fetch(SHORTCUT_GROUPS_API_URL, {
+      headers: {
+        'Shortcut-Token': SHORTCUT_API_TOKEN || '',
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const data: Group[] = await response.json();
+    console.log(`Groups/Teams response data: ${JSON.stringify(data)}`); // Debugging log
+
+    if (!Array.isArray(data)) {
+      throw new Error('Invalid response format');
+    }
+
+    console.log(`Fetched ${data.length} groups/teams`); // Debugging log
+    return { success: true, value: data };
+  } catch (error) {
+    console.error('Error fetching groups/teams:', error); // Enhanced error logging
     return { success: false, error };
   }
 };
@@ -114,7 +159,9 @@ const formatDate = (dateString: string | null): string => {
 };
 
 // Function to format bug data
-const formatBugData = (bugs: Bug[]): any[] => {
+const formatBugData = (bugs: Bug[], groups: Group[]): any[] => {
+  const groupMap = new Map(groups.map(group => [group.id, group.name]));
+
   return bugs.map((bug: Bug) => {
     const customFields = bug.custom_fields
       .filter((field: any) => field.value === 'Missed Bug (Production)' || field.value === 'Found Bug (Development)')
@@ -122,6 +169,7 @@ const formatBugData = (bugs: Bug[]): any[] => {
       .join(', ');
 
     const customFieldsValue = customFields || 'Others';
+    const teamName = bug.group_id ? groupMap.get(bug.group_id) : 'Unknown';
 
     return [
       bug.id,
@@ -136,7 +184,7 @@ const formatBugData = (bugs: Bug[]): any[] => {
       bug.estimate,
       bug.stats.num_related_documents,
       bug.app_url,
-      bug.team_name || 'Unknown' // Assuming team_name is part of the bug data
+      teamName
     ];
   });
 };
@@ -152,10 +200,16 @@ const main = async (): Promise<void> => {
     return;
   }
 
-  const formattedData = formatBugData(bugCardsResult.value);
+  const groupsResult = await getAllGroupsFromShortcut();
+  if (!groupsResult.success || !groupsResult.value) {
+    console.error('Error fetching groups/teams:', groupsResult.error);
+    return;
+  }
+
+  const formattedData = formatBugData(bugCardsResult.value, groupsResult.value);
 
   const writeResult = await writeToGoogleSheets([[
-    'ID', 'Name', 'Story Type', 'Started At', 'Completed At', 'Created At', 'Updated At', 'Custom Fields', 'Labels', 'Estimate', 'Num Related Documents', 'App URL', 'Team Name'
+    'ID', 'Name', 'Story Type', 'Started At', 'Completed At', 'Created At', 'Updated At', 'Bug Type', 'Labels', 'Estimate', 'Num Related Documents', 'App URL', 'Team Name'
   ], ...formattedData]);
 
   if (!writeResult.success) {
