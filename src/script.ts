@@ -44,7 +44,7 @@ const SHORTCUT_GROUPS_API_URL = 'https://api.app.shortcut.com/api/v3/groups';
 // Google Sheets API configuration
 const GOOGLE_SHEETS_ID = process.env.GOOGLE_SHEETS_ID;
 const GOOGLE_SHEETS_RANGE = 'Sheet1!A1';
-const GOOGLE_CREDENTIALS = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+const GOOGLE_CREDENTIALS_BASE64 = process.env.GOOGLE_CREDENTIALS_BASE64;
 
 // Function to get the date one year ago
 const getDateOneYearAgo = (): string => {
@@ -97,7 +97,7 @@ const getAllBugCardsFromShortcut = async (): Promise<Result<Bug[]>> => {
 // Function to get all groups from Shortcut
 const getAllGroupsFromShortcut = async (): Promise<Result<Group[]>> => {
   try {
-    console.log(`Fetching groups/teams from URL: ${SHORTCUT_GROUPS_API_URL}`); // Debugging log
+    console.log(`Fetching groups from URL: ${SHORTCUT_GROUPS_API_URL}`); // Debugging log
     const response = await fetch(SHORTCUT_GROUPS_API_URL, {
       headers: {
         'Shortcut-Token': SHORTCUT_API_TOKEN || '',
@@ -109,16 +109,16 @@ const getAllGroupsFromShortcut = async (): Promise<Result<Group[]>> => {
     }
 
     const data: Group[] = await response.json();
-    console.log(`Groups/Teams response data: ${JSON.stringify(data)}`); // Debugging log
+    console.log(`Groups response data: ${JSON.stringify(data)}`); // Debugging log
 
     if (!Array.isArray(data)) {
       throw new Error('Invalid response format');
     }
 
-    console.log(`Fetched ${data.length} groups/teams`); // Debugging log
+    console.log(`Fetched ${data.length} groups`); // Debugging log
     return { success: true, value: data };
   } catch (error) {
-    console.error('Error fetching groups/teams:', error); // Enhanced error logging
+    console.error('Error fetching groups:', error); // Enhanced error logging
     return { success: false, error };
   }
 };
@@ -126,8 +126,9 @@ const getAllGroupsFromShortcut = async (): Promise<Result<Group[]>> => {
 // Function to write data to Google Sheets
 const writeToGoogleSheets = async (data: any[]): Promise<Result<void>> => {
   try {
+    const credentials = JSON.parse(Buffer.from(GOOGLE_CREDENTIALS_BASE64 || '', 'base64').toString('utf8'));
     const auth = new google.auth.GoogleAuth({
-      keyFile: GOOGLE_CREDENTIALS,
+      credentials,
       scopes: ['https://www.googleapis.com/auth/spreadsheets'],
     });
 
@@ -209,7 +210,7 @@ const main = async (): Promise<void> => {
   const formattedData = formatBugData(bugCardsResult.value, groupsResult.value);
 
   const writeResult = await writeToGoogleSheets([[
-    'ID', 'Name', 'Story Type', 'Started At', 'Completed At', 'Created At', 'Updated At', 'Bug Type', 'Labels', 'Estimate', 'Num Related Documents', 'App URL', 'Team Name'
+    'ID', 'Name', 'Story Type', 'Started At', 'Completed At', 'Created At', 'Updated At', 'Custom Fields', 'Labels', 'Estimate', 'Num Related Documents', 'App URL', 'Team Name'
   ], ...formattedData]);
 
   if (!writeResult.success) {
