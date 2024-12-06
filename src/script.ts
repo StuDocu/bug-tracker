@@ -53,17 +53,17 @@ const GOOGLE_SHEETS_ID = process.env.GOOGLE_SHEETS_ID;
 const GOOGLE_SHEETS_RANGE = 'Sheet1!A1';
 const GOOGLE_CREDENTIALS_BASE64 = process.env.GOOGLE_CREDENTIALS_BASE64;
 
-// Function to get the date one year ago
-const getDateOneYearAgo = (): string => {
+// Function to get the date six months ago
+const getDateSixMonthsAgo = (): string => {
   const date = new Date();
-  date.setFullYear(date.getFullYear() - 1);
+  date.setMonth(date.getMonth() - 6);
   return date.toISOString().split('T')[0];
 };
 
 // Function to get all bug-type cards from Shortcut with pagination
 const getAllBugCardsFromShortcut = async (): Promise<Result<Bug[]>> => {
-  const dateOneYearAgo = getDateOneYearAgo();
-  const query = `updated_at:-${dateOneYearAgo}.. type:bug`;
+  const dateSixMonthsAgo = getDateSixMonthsAgo();
+  const query = `updated_at:-${dateSixMonthsAgo}.. type:bug`;
   let allBugs: Bug[] = [];
   let next: string | null = null;
 
@@ -74,6 +74,7 @@ const getAllBugCardsFromShortcut = async (): Promise<Result<Bug[]>> => {
 
       // Break the loop if the next parameter contains a specific pattern
       if (next && next.includes('page_size=1')) {
+        console.log("Next parameter ", next)
         console.log('Breaking the loop to avoid 400 error');
         break;
       }
@@ -116,7 +117,6 @@ const getAllGroupsFromShortcut = async (): Promise<Result<Group[]>> => {
     }
 
     const data: Group[] = await response.json();
-    console.log(`Groups response data: ${JSON.stringify(data)}`); // Debugging log
 
     if (!Array.isArray(data)) {
       throw new Error('Invalid response format');
@@ -145,7 +145,6 @@ const getAllCustomFieldsFromShortcut = async (): Promise<Result<CustomField[]>> 
     }
 
     const data: CustomField[] = await response.json();
-    console.log(`Custom fields response data: ${JSON.stringify(data)}`); // Debugging log
 
     if (!Array.isArray(data)) {
       throw new Error('Invalid response format');
@@ -223,7 +222,6 @@ const formatBugData = (bugs: Bug[], groups: Group[], customFields: CustomField[]
   const customFieldMap = new Map(customFields.map(field => [field.id, field]));
 
   return bugs.map((bug: Bug) => {
-    console.log(`Processing bug: ${JSON.stringify(bug.custom_fields)}`); // Debugging log
     const customFields = bug.custom_fields
       .filter((field: any) => field.value === 'Missed Bug (Production)' || field.value === 'Found Bug (Development)')
       .map((field: any) => field.value)
