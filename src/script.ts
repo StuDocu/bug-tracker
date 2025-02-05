@@ -62,8 +62,7 @@ const getDateSixMonthsAgo = (): string => {
 
 // Function to get all bug-type cards from Shortcut with pagination
 const getAllBugCardsFromShortcut = async (): Promise<Result<Bug[]>> => {
-  const dateSixMonthsAgo = getDateSixMonthsAgo();
-  const query = `updated_at:-${dateSixMonthsAgo}.. type:bug`;
+  const query = `type:bug !is:archived !is:done`;
   let allBugs: Bug[] = [];
   let next: string | null = null;
 
