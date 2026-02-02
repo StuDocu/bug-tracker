@@ -53,12 +53,6 @@ const GOOGLE_SHEETS_ID = process.env.GOOGLE_SHEETS_ID;
 const GOOGLE_SHEETS_RANGE = 'Sheet1!A1';
 const GOOGLE_CREDENTIALS_BASE64 = process.env.GOOGLE_CREDENTIALS_BASE64;
 
-// Function to get the date six months ago
-const getDateSixMonthsAgo = (): string => {
-  const date = new Date();
-  date.setMonth(date.getMonth() - 6);
-  return date.toISOString().split('T')[0];
-};
 
 // Function to get all bug-type cards from Shortcut with pagination
 const getAllBugCardsFromShortcut = async (): Promise<Result<Bug[]>> => {

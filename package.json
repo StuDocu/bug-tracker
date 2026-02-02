@@ -5,7 +5,8 @@
   "main": "dist/script.js",
   "scripts": {
     "build": "tsc",
-    "start": "node dist/script.js"
+    "start": "node dist/script.js",
+    "migrate": "node dist/linear-to-shortcut-migration.js"
   },
   "repository": {
     "type": "git",
