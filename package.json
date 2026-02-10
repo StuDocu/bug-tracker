@@ -6,7 +6,8 @@
   "scripts": {
     "build": "tsc",
     "start": "node dist/script.js",
-    "migrate": "node dist/linear-to-shortcut-migration.js"
+    "migrate": "node dist/linear-to-shortcut-migration.js",
+    "fix-duplicates": "node dist/linear-to-shortcut-migration.js --fix-duplicates"
   },
   "repository": {
     "type": "git",

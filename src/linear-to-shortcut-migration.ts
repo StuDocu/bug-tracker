@@ -221,6 +221,7 @@ type ShortcutStory = {
   name: string;
   app_url?: string;
   url?: string;
+  archived?: boolean;
 };
 
 // API Configuration
@@ -1995,6 +1996,220 @@ const updateStoryWorkflowState = async (
   return { success: true, value: { updated: true } };
 };
 
+// --- Fix duplicates (archive duplicate stories, keep last-updated per group) ---
+// Parse a single CSV line handling quoted fields ("" = escaped quote).
+function parseCsvLine(line: string): string[] {
+  const out: string[] = [];
+  let i = 0;
+  while (i < line.length) {
+    if (line[i] === '"') {
+      let field = '';
+      i++;
+      while (i < line.length) {
+        if (line[i] === '"') {
+          if (line[i + 1] === '"') {
+            field += '"';
+            i += 2;
+          } else {
+            i++;
+            break;
+          }
+        } else {
+          field += line[i];
+          i++;
+        }
+      }
+      out.push(field);
+    } else {
+      const start = i;
+      while (i < line.length && line[i] !== ',') i++;
+      out.push(line.slice(start, i).trim());
+      if (line[i] === ',') i++;
+    }
+  }
+  return out;
+}
+
+type DuplicateGroupResult = {
+  groupIndex: number;
+  kept: { storyId: number; lastUpdated: string; url: string };
+  toArchive: Array<{ storyId: number; lastUpdated: string; url: string }>;
+};
+
+// Parse duplicates CSV: groups by Duplicate Group #, for each group keep the story with latest Last Updated.
+// Returns per-group kept/archived with URLs and a flat list of story IDs to archive.
+function parseDuplicatesCsv(csvPath: string): Result<{ groups: DuplicateGroupResult[]; toArchiveFlat: number[] }> {
+  let content: string;
+  try {
+    content = fs.readFileSync(csvPath, 'utf-8');
+  } catch (e) {
+    return { success: false, error: e };
+  }
+  const lines = content.split(/\r?\n/).filter(l => l.trim());
+  if (lines.length < 2) return { success: true, value: { groups: [], toArchiveFlat: [] } };
+
+  const groups: DuplicateGroupResult[] = [];
+  let currentGroup: Array<{ storyId: number; lastUpdated: string; url: string }> = [];
+  let groupIndex = 0;
+  const flushGroup = () => {
+    if (currentGroup.length < 2) {
+      currentGroup = [];
+      return;
+    }
+    const parsed = currentGroup
+      .map(({ storyId, lastUpdated, url }) => ({
+        storyId,
+        url,
+        date: new Date(lastUpdated.replace(/\s/g, ' ')).getTime(),
+      }))
+      .filter(x => !isNaN(x.date));
+    if (parsed.length === 0) {
+      currentGroup = [];
+      return;
+    }
+    const maxDate = Math.max(...parsed.map(x => x.date));
+    const keptEntry = currentGroup.find(
+      ({ storyId, lastUpdated }) => new Date(lastUpdated.replace(/\s/g, ' ')).getTime() === maxDate
+    )!;
+    const toArchiveEntries = currentGroup.filter(e => e.storyId !== keptEntry.storyId);
+    groups.push({
+      groupIndex: ++groupIndex,
+      kept: { storyId: keptEntry.storyId, lastUpdated: keptEntry.lastUpdated, url: keptEntry.url },
+      toArchive: toArchiveEntries,
+    });
+    currentGroup = [];
+  };
+
+  const header = parseCsvLine(lines[0]);
+  const idxGroup = header.findIndex(h => /Duplicate Group #/i.test(h));
+  const idxStoryId = header.findIndex(h => /Shortcut Story ID/i.test(h));
+  const idxUrl = header.findIndex(h => /Shortcut URL/i.test(h));
+  const idxLastUpdated = header.findIndex(h => /Last Updated/i.test(h));
+  if (idxGroup < 0 || idxStoryId < 0 || idxLastUpdated < 0) {
+    return { success: false, error: new Error('CSV must have columns: Duplicate Group #, Shortcut Story ID, Last Updated') };
+  }
+
+  for (let i = 1; i < lines.length; i++) {
+    const row = parseCsvLine(lines[i]);
+    const groupNum = row[idxGroup]?.trim();
+    const storyIdRaw = row[idxStoryId]?.trim();
+    const url = row[idxUrl]?.trim() || `https://app.shortcut.com/studocu/story/${storyIdRaw || ''}`;
+    const lastUpdated = row[idxLastUpdated]?.trim();
+    const storyId = storyIdRaw ? parseInt(storyIdRaw, 10) : NaN;
+
+    if (groupNum) flushGroup();
+    if (!storyIdRaw || isNaN(storyId) || !lastUpdated) continue;
+    currentGroup.push({ storyId, lastUpdated, url });
+  }
+  flushGroup();
+
+  const toArchiveFlat = groups.reduce((acc: number[], g: DuplicateGroupResult) =>
+    acc.concat(g.toArchive.map((x: { storyId: number }) => x.storyId)), []);
+  return { success: true, value: { groups, toArchiveFlat } };
+}
+
+type ArchiveResult = { skippedAlreadyArchived?: boolean };
+
+const sleep = (ms: number): Promise<void> => new Promise(r => setTimeout(r, ms));
+
+// Shortcut allows 200 req/min; we do GET + PUT per story, so delay between stories to avoid 429.
+const ARCHIVE_DELAY_MS = 650;
+const RATE_LIMIT_RETRY_AFTER_MS = 65_000;
+
+const archiveShortcutStory = async (storyId: number): Promise<Result<ArchiveResult>> => {
+  const is429 = (r: Result<unknown>) =>
+    r.error && typeof (r.error as Error).message === 'string' && (r.error as Error).message.includes('429');
+  let getResult = await shortcutApiRequest<ShortcutStory>(`/stories/${storyId}`);
+  if (!getResult.success) {
+    if (is429(getResult)) {
+      await sleep(RATE_LIMIT_RETRY_AFTER_MS);
+      getResult = await shortcutApiRequest<ShortcutStory>(`/stories/${storyId}`);
+    }
+    if (!getResult.success) return { success: false, error: getResult.error };
+  }
+  if (getResult.value?.archived === true) {
+    return { success: true, value: { skippedAlreadyArchived: true } };
+  }
+  let putResult = await shortcutApiRequest<ShortcutStory>(`/stories/${storyId}`, 'PUT', { archived: true });
+  if (!putResult.success) {
+    if (is429(putResult)) {
+      await sleep(RATE_LIMIT_RETRY_AFTER_MS);
+      putResult = await shortcutApiRequest<ShortcutStory>(`/stories/${storyId}`, 'PUT', { archived: true });
+    }
+    if (!putResult.success) return { success: false, error: putResult.error };
+  }
+  return { success: true, value: {} };
+};
+
+const DRY_RUN_GROUP_LIMIT = 50;
+
+const fixDuplicatesMain = async (
+  csvPath: string,
+  options?: { dryRun?: boolean; limitGroups?: number }
+): Promise<void> => {
+  const dryRun = options?.dryRun ?? false;
+  const limitGroups = options?.limitGroups ?? DRY_RUN_GROUP_LIMIT;
+
+  if (!dryRun && !SHORTCUT_API_TOKEN?.trim()) {
+    console.error('❌ SHORTCUT_API_TOKEN is required for --fix-duplicates (omit --dry-run to archive).');
+    return;
+  }
+
+  const parseResult = parseDuplicatesCsv(csvPath);
+  if (!parseResult.success) {
+    console.error('❌ Failed to parse duplicates CSV:', parseResult.error);
+    return;
+  }
+  const { groups, toArchiveFlat } = parseResult.value ?? { groups: [], toArchiveFlat: [] };
+
+  if (dryRun) {
+    const limited = groups.slice(0, limitGroups);
+    const archivedLinks = limited.reduce((acc: string[], g: DuplicateGroupResult) =>
+      acc.concat(g.toArchive.map((x: { url: string }) => x.url)), []);
+    console.log(`\n🔍 DRY RUN – first ${limitGroups} duplicate groups (${limited.length} groups, ${archivedLinks.length} would be archived)\n`);
+    console.log('--- Duplicates archived (would be) ---\n');
+    archivedLinks.forEach((url: string) => console.log(url));
+    console.log('\n--- Kept (latest update per group) ---\n');
+    limited.forEach(g => {
+      console.log(`Group ${g.groupIndex}: ${g.kept.url}  (Last updated: ${g.kept.lastUpdated})`);
+    });
+    console.log('\n✅ Dry run complete. Run without --dry-run to archive.');
+    return;
+  }
+
+  // Skip bogus IDs from CSV parsing (e.g. "Total Copies" parsed as story ID); real Shortcut IDs are 6 digits.
+  const validToArchive = toArchiveFlat.filter(id => id >= 10000);
+  const skippedInvalid = toArchiveFlat.length - validToArchive.length;
+  if (skippedInvalid > 0) {
+    console.log(`⚠️  Skipping ${skippedInvalid} invalid story ID(s) from CSV (e.g. < 10000).\n`);
+  }
+  if (validToArchive.length === 0) {
+    console.log('✅ No duplicate stories to archive.');
+    return;
+  }
+  console.log(`📋 Archiving ${validToArchive.length} duplicate story/stories (keeping last-updated per group)...\n`);
+  let archived = 0;
+  let skipped = 0;
+  let fail = 0;
+  for (const storyId of validToArchive) {
+    const result = await archiveShortcutStory(storyId);
+    if (result.success) {
+      if (result.value?.skippedAlreadyArchived) {
+        skipped++;
+        console.log(`  ⏭️  Story #${storyId} already archived, skipped`);
+      } else {
+        archived++;
+        console.log(`  ✅ Archived story #${storyId}`);
+      }
+    } else {
+      fail++;
+      console.error(`  ❌ Failed to archive story #${storyId}:`, result.error);
+    }
+    await sleep(ARCHIVE_DELAY_MS);
+  }
+  console.log(`\n🎉 Done. Archived: ${archived}, already archived (skipped): ${skipped}, failed: ${fail}.`);
+};
+
 // Design tickets touched this run (moved to Design workflow or created in Design) for end summary
 type DesignTicketRecord = {
   linearId: string;
@@ -2678,6 +2893,19 @@ const migrateTeam = async (
 const main = async (): Promise<void> => {
   // Reload .env in case main is called after env changed
   dotenv.config({ path: path.join(fs.existsSync(path.join(process.cwd(), '.env')) ? process.cwd() : path.join(__dirname, '..'), '.env') });
+
+  // Fix duplicates mode: --fix-duplicates <path-to-csv> [--dry-run] — archive duplicate stories, keep last-updated per group
+  const fixDuplicatesIdx = process.argv.indexOf('--fix-duplicates');
+  if (fixDuplicatesIdx !== -1) {
+    const csvPath = process.argv[fixDuplicatesIdx + 1];
+    if (!csvPath) {
+      console.error('❌ --fix-duplicates requires a CSV file path. Usage: node ... --fix-duplicates /path/to/duplicates.csv [--dry-run]');
+      return;
+    }
+    const dryRun = process.argv.includes('--dry-run');
+    await fixDuplicatesMain(csvPath, { dryRun, limitGroups: DRY_RUN_GROUP_LIMIT });
+    return;
+  }
 
   if (!LINEAR_API_TOKEN || !String(LINEAR_API_TOKEN).trim()) {
     console.error('❌ LINEAR_API_TOKEN is not set. Check that .env exists in the project root and contains LINEAR_API_TOKEN=...');
