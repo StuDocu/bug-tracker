@@ -9,7 +9,8 @@ type Result<T> = {
   error?: any;
 };
 
-type Bug = {
+// Shortcut bug card (source: search API)
+type ShortcutBug = {
   id: number;
   name: string;
   story_type: string;
@@ -17,12 +18,9 @@ type Bug = {
   completed_at: string | null;
   created_at: string;
   updated_at: string;
-  custom_fields: { field_id: string; value_id: string; value: string }[];
   labels: { name: string }[];
   estimate: number | null;
-  stats: { num_related_documents: number };
   app_url: string;
-  team_name?: string;
   group_id?: string;
 };
 
@@ -31,33 +29,128 @@ type Group = {
   name: string;
 };
 
-type CustomField = {
-  id: string;
-  name: string;
-  values: { id: string; value: string }[];
+type ShortcutResponse = {
+  data: ShortcutBug[];
+  next: string | null;
 };
 
-type ShortcutResponse = {
-  data: Bug[];
-  next: string | null;
+// Linear bug issue (source: GraphQL issues query)
+type LinearBug = {
+  identifier: string;
+  title: string;
+  createdAt: string;
+  updatedAt: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  estimate: number | null;
+  url: string;
+  labels: { nodes: { name: string }[] };
+  team: { name: string };
+};
+
+// One row of the output sheet, source-agnostic
+type SheetRow = {
+  id: string;
+  name: string;
+  type: string;
+  startedAt: string | null;
+  completedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  labels: string;
+  estimate: number | null;
+  url: string;
+  teamName: string;
+};
+
+type LinearGraphQLResponse<T> = {
+  data?: T;
+  errors?: { message: string }[];
 };
 
 // Shortcut API configuration
 const SHORTCUT_API_TOKEN = process.env.SHORTCUT_API_TOKEN;
 const SHORTCUT_API_URL = 'https://api.app.shortcut.com/api/v3/search/stories';
 const SHORTCUT_GROUPS_API_URL = 'https://api.app.shortcut.com/api/v3/groups';
-const SHORTCUT_CUSTOM_FIELDS_API_URL = 'https://api.app.shortcut.com/api/v3/custom-fields';
+
+// Linear API configuration (same pattern as linear-to-shortcut-migration.ts)
+const LINEAR_API_TOKEN = process.env.LINEAR_API_TOKEN;
+const LINEAR_API_URL = 'https://api.linear.app/graphql';
 
 // Google Sheets API configuration
 const GOOGLE_SHEETS_ID = process.env.GOOGLE_SHEETS_ID;
 const GOOGLE_SHEETS_RANGE = 'Sheet1!A1';
 const GOOGLE_CREDENTIALS_BASE64 = process.env.GOOGLE_CREDENTIALS_BASE64;
 
+// Fetch all open bugs from Linear: label "Bug", not completed/canceled (BND-41 mapping:
+// this workspace has one cross-team "Bug" label rather than per-team ones, so no lookup table needed)
+const getAllBugsFromLinear = async (): Promise<Result<LinearBug[]>> => {
+  const query = `
+    query($after: String) {
+      issues(
+        filter: { labels: { name: { eq: "Bug" } }, state: { type: { nin: ["completed", "canceled"] } } }
+        first: 100
+        after: $after
+      ) {
+        nodes {
+          identifier
+          title
+          createdAt
+          updatedAt
+          startedAt
+          completedAt
+          estimate
+          url
+          labels { nodes { name } }
+          team { name }
+        }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  `;
+
+  try {
+    let allBugs: LinearBug[] = [];
+    let after: string | undefined;
+
+    do {
+      const response = await fetch(LINEAR_API_URL, {
+        method: 'POST',
+        headers: {
+          'Authorization': LINEAR_API_TOKEN || '',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ query, variables: { after } }),
+      });
+
+      if (!response.ok) {
+        throw new Error(`HTTP error! status: ${response.status}`);
+      }
+
+      const body: LinearGraphQLResponse<{ issues: { nodes: LinearBug[]; pageInfo: { hasNextPage: boolean; endCursor: string } } }> = await response.json();
+
+      if (body.errors) {
+        throw new Error(`GraphQL errors: ${body.errors.map(e => e.message).join(', ')}`);
+      }
+      if (!body.data) {
+        throw new Error('Linear GraphQL response missing data');
+      }
+
+      allBugs = allBugs.concat(body.data.issues.nodes);
+      after = body.data.issues.pageInfo.hasNextPage ? body.data.issues.pageInfo.endCursor : undefined;
+    } while (after);
+
+    console.log(`Fetched ${allBugs.length} bug issues from Linear`);
+    return { success: true, value: allBugs };
+  } catch (error) {
+    return { success: false, error };
+  }
+};
 
 // Function to get all bug-type cards from Shortcut with pagination
-const getAllBugCardsFromShortcut = async (): Promise<Result<Bug[]>> => {
+const getAllBugCardsFromShortcut = async (): Promise<Result<ShortcutBug[]>> => {
   const query = `type:bug !is:archived !is:done`;
-  let allBugs: Bug[] = [];
+  let allBugs: ShortcutBug[] = [];
   let next: string | null = null;
 
   try {
@@ -87,7 +180,7 @@ const getAllBugCardsFromShortcut = async (): Promise<Result<Bug[]>> => {
       next = data.next;
     } while (next);
 
-    console.log(`Fetched ${allBugs.length} bug cards`); // Debugging log
+    console.log(`Fetched ${allBugs.length} bug cards from Shortcut`); // Debugging log
 
     return { success: true, value: allBugs };
   } catch (error) {
@@ -119,34 +212,6 @@ const getAllGroupsFromShortcut = async (): Promise<Result<Group[]>> => {
     return { success: true, value: data };
   } catch (error) {
     console.error('Error fetching groups:', error); // Enhanced error logging
-    return { success: false, error };
-  }
-};
-
-// Function to get all custom fields from Shortcut
-const getAllCustomFieldsFromShortcut = async (): Promise<Result<CustomField[]>> => {
-  try {
-    console.log(`Fetching custom fields from URL: ${SHORTCUT_CUSTOM_FIELDS_API_URL}`); // Debugging log
-    const response = await fetch(SHORTCUT_CUSTOM_FIELDS_API_URL, {
-      headers: {
-        'Shortcut-Token': SHORTCUT_API_TOKEN || '',
-      },
-    });
-
-    if (!response.ok) {
-      throw new Error(`HTTP error! status: ${response.status}`);
-    }
-
-    const data: CustomField[] = await response.json();
-
-    if (!Array.isArray(data)) {
-      throw new Error('Invalid response format');
-    }
-
-    console.log(`Fetched ${data.length} custom fields`); // Debugging log
-    return { success: true, value: data };
-  } catch (error) {
-    console.error('Error fetching custom fields:', error); // Enhanced error logging
     return { success: false, error };
   }
 };
@@ -209,82 +274,67 @@ const formatDate = (dateString: string | null): string => {
   return `${year}-${month}-${day}`;
 };
 
-// Function to format bug data
-const formatBugData = (bugs: Bug[], groups: Group[], customFields: CustomField[]): any[] => {
-  const groupMap = new Map(groups.map(group => [group.id, group.name]));
-  const customFieldMap = new Map(customFields.map(field => [field.id, field]));
+const linearBugToRow = (bug: LinearBug): SheetRow => ({
+  id: bug.identifier,
+  name: bug.title,
+  type: 'bug',
+  startedAt: bug.startedAt,
+  completedAt: bug.completedAt,
+  createdAt: bug.createdAt,
+  updatedAt: bug.updatedAt,
+  labels: bug.labels.nodes.map(l => l.name).join(', '),
+  estimate: bug.estimate,
+  url: bug.url,
+  teamName: bug.team?.name || 'Unknown',
+});
 
-  return bugs.map((bug: Bug) => {
-    const customFields = bug.custom_fields
-      .filter((field: any) => field.value === 'Missed Bug (Production)' || field.value === 'Found Bug (Development)')
-      .map((field: any) => field.value)
-      .join(', ');
+const shortcutBugToRow = (bug: ShortcutBug, groupMap: Map<string, string>): SheetRow => ({
+  id: String(bug.id),
+  name: bug.name,
+  type: bug.story_type,
+  startedAt: bug.started_at,
+  completedAt: bug.completed_at,
+  createdAt: bug.created_at,
+  updatedAt: bug.updated_at,
+  labels: bug.labels.map(l => l.name).join(', '),
+  estimate: bug.estimate,
+  url: bug.app_url,
+  teamName: bug.group_id ? (groupMap.get(bug.group_id) || 'Unknown') : 'Unknown',
+});
 
-    const customFieldsValue = customFields || 'Others';
-    const teamName = bug.group_id ? groupMap.get(bug.group_id) : 'Unknown';
-
-    // Find the "Bugs found" custom field value
-    const bugsFoundField = bug.custom_fields.find(field => {
-      const customField = customFieldMap.get(field.field_id);
-      if (customField && customField.name === 'Bugs Found') {
-        const value = customField.values.find(v => v.id === field.value_id);
-        return value ? value.value : 'N/A';
-      }
-      return false;
-    });
-    const bugsFoundValue = bugsFoundField ? bugsFoundField.value : 'N/A';
-
-    // Find the "Root Cause (for bugs)" custom field value
-    const rootCauseField = bug.custom_fields.find(field => {
-      const customField = customFieldMap.get(field.field_id);
-      if (customField && customField.name === 'Root Cause (for bugs)') {
-        const value = customField.values.find(v => v.id === field.value_id);
-        return value ? value.value : 'N/A';
-      }
-      return false;
-    });
-    const rootCauseValue = rootCauseField ? rootCauseField.value : 'N/A';
-
-    // Find the "Severity" custom field value
-    const severityField = bug.custom_fields.find(field => {
-      const customField = customFieldMap.get(field.field_id);
-      if (customField && customField.name === 'Severity') {
-        const value = customField.values.find(v => v.id === field.value_id);
-        return value ? value.value : 'N/A';
-      }
-      return false;
-    });
-    const severityValue = severityField ? severityField.value : 'N/A';
-
-    return [
-      bug.id,
-      bug.name,
-      bug.story_type,
-      formatDate(bug.started_at),
-      formatDate(bug.completed_at),
-      formatDate(bug.created_at),
-      formatDate(bug.updated_at),
-      customFieldsValue,
-      bug.labels.map((label: any) => label.name).join(', '),
-      bug.estimate,
-      bug.stats.num_related_documents,
-      bug.app_url,
-      teamName,
-      bugsFoundValue, // Add the "Bugs found" custom field value
-      rootCauseValue, // Add the "Root Cause (for bugs)" custom field value
-      severityValue // Add the "Severity" custom field value
-    ];
-  });
-};
+const formatRows = (rows: SheetRow[]): any[] =>
+  rows.map(row => [
+    row.id,
+    row.name,
+    row.type,
+    formatDate(row.startedAt),
+    formatDate(row.completedAt),
+    formatDate(row.createdAt),
+    formatDate(row.updatedAt),
+    row.labels,
+    row.estimate,
+    row.url,
+    row.teamName,
+  ]);
 
 // Main function
 const main = async (): Promise<void> => {
   // Reload environment variables
   dotenv.config();
 
+  // Linear-first (BND-68): Linear-tracked bugs are the source of truth going forward.
+  // Shortcut is still queried in full as a fallback for teams/bugs not yet in Linear -
+  // ponytail: no de-dup between the two beyond that, revisit once every team has cut over
+  // and the Shortcut leg can be dropped.
+  const linearBugsResult = await getAllBugsFromLinear();
+  if (!linearBugsResult.success || !linearBugsResult.value) {
+    console.error('Error fetching bugs from Linear:', linearBugsResult.error);
+    return;
+  }
+
   const bugCardsResult = await getAllBugCardsFromShortcut();
   if (!bugCardsResult.success || !bugCardsResult.value) {
-    console.error('Error fetching bug cards:', bugCardsResult.error);
+    console.error('Error fetching bug cards from Shortcut:', bugCardsResult.error);
     return;
   }
 
@@ -294,17 +344,16 @@ const main = async (): Promise<void> => {
     return;
   }
 
-  const customFieldsResult = await getAllCustomFieldsFromShortcut();
-  if (!customFieldsResult.success || !customFieldsResult.value) {
-    console.error('Error fetching custom fields:', customFieldsResult.error);
-    return;
-  }
+  const groupMap = new Map(groupsResult.value.map(group => [group.id, group.name]));
 
-  const formattedData = formatBugData(bugCardsResult.value, groupsResult.value, customFieldsResult.value);
+  const rows: SheetRow[] = [
+    ...linearBugsResult.value.map(linearBugToRow),
+    ...bugCardsResult.value.map(bug => shortcutBugToRow(bug, groupMap)),
+  ];
 
   const writeResult = await writeToGoogleSheets([[
-    'ID', 'Name', 'Story Type', 'Started At', 'Completed At', 'Created At', 'Updated At', 'Bug Type', 'Labels', 'Estimate', 'Num Related Documents', 'App URL', 'Team Name', 'Bugs Found', 'Root Cause', 'Severity'
-  ], ...formattedData]);
+    'ID', 'Name', 'Type', 'Started At', 'Completed At', 'Created At', 'Updated At', 'Labels', 'Estimate', 'URL', 'Team Name'
+  ], ...formatRows(rows)]);
 
   if (!writeResult.success) {
     console.error('Error writing to Google Sheets:', writeResult.error);
@@ -318,7 +367,7 @@ const main = async (): Promise<void> => {
     console.error('Error: GOOGLE_SHEETS_ID is not defined.');
   }
 
-  console.log('🎉✨ Data successfully written to Google Sheets! 🚀📊');
+  console.log(`🎉✨ Data successfully written to Google Sheets! ${rows.length} bugs (${linearBugsResult.value.length} Linear, ${bugCardsResult.value.length} Shortcut) 🚀📊`);
 };
 
 main();
